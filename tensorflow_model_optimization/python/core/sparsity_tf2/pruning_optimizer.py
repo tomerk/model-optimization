@@ -12,13 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Keras callbacks for pruning."""
+"""Meta-optimizer to interfece with custom sparse training pruners."""
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-# import g3
 import tensorflow as tf
 
 
@@ -26,17 +25,29 @@ tf.keras.utils.register_keras_serializable(package='tfmot',
                                            name='PruningOptimizer')
 class PruningOptimizer(tf.keras.optimizers.Optimizer):
 
-  def __init__(self, optimizer, pruning_config):
+  def __init__(self, optimizer, pruning_config, name='tfmot_pruning_optimizer'):
+    super(PruningOptimizer, self).__init__(name)
     self._optimizer = tf.keras.optimizers.get(optimizer)
     self._pruning_config = pruning_config
 
   def get_config(self):
-    # Todo
-    pass
-
+    config = {'name': self._name}
+    if self.clipnorm is not None:
+      config['clipnorm'] = self.clipnorm
+    if self.clipvalue is not None:
+      config['clipvalue'] = self.clipvalue
+    config['_optimizer'] = self._optimizer
+    config['_pruning_config'] = self._pruning_config
+    return config
+  
   def from_config(cls, config, custom_objects=None):
-    # todo
-    pass
+    if "lr" in config:
+      config["learning_rate"] = config.pop("lr")
+    if "learning_rate" in config:
+      if isinstance(config["learning_rate"], dict):
+        config["learning_rate"] = learning_rate_schedule.deserialize(
+            config["learning_rate"], custom_objects=custom_objects)
+    return cls(**config)
 
   def configure(self, model):
     self._pruning_config.configure(model)
