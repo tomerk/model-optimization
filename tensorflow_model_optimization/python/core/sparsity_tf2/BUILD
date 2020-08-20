@@ -157,7 +157,7 @@ py_test(
 
 py_test(
     name = "riglpruner_test",
-    size = "large",
+    size = "large", # TODO(kaftan): large tests don't get run in CI, need to make it smaller and/or shard
     srcs = ["riglpruner_test.py"],
     srcs_version = "PY2AND3",
     visibility = ["//visibility:public"],
