@@ -17,6 +17,7 @@
 import abc
 import six
 import tensorflow as tf
+import numpy as np
 
 @six.add_metaclass(abc.ABCMeta)
 class Schedule(object):
@@ -88,9 +89,9 @@ class Schedule(object):
       raise ValueError('frequency should be > 0')
 
   @staticmethod
-  def _validate_sparsity(sparsity, variable_name):
-    if not 0.0 <= sparsity < 1.0:
-      raise ValueError('{} must be in range [0,1)'.format(variable_name))
+  def _validate_ratio(sparsity, variable_name):
+    if not 0.0 <= sparsity <= 1.0:
+      raise ValueError('{} must be in range [0,1]'.format(variable_name))
 
   @abc.abstractmethod
   def __call__(self, step):
@@ -141,11 +142,14 @@ class ConstantSchedule(Schedule):
     self.end_step = end_step
     self.frequency = frequency
 
+    self._validate_step(self.begin_step, self.end_step, self.frequency, True)
+    self._validate_ratio(initial_drop_fraction, 'drop_ratio')
+
   def get_config(self):
     return {
         'class_name': self.__class__.__name__,
         'config': {
-            'alpha': self.alpha,
+            'initial_drop_fraction': self.alpha,
             'begin_step': self.begin_step,
             'end_step': self.end_step,
             'frequency': self.frequency
@@ -163,3 +167,179 @@ class ConstantSchedule(Schedule):
     return (self._should_update_in_step(step, self.begin_step, self.end_step,
                                        self.frequency),
             self._get_update_percentage(self.alpha, step))
+
+
+
+class CosineSchedule(Schedule):
+  """The drop fraction (alpha) annealed with a cosine annealing schedule."""
+
+  def __init__(self,
+               initial_drop_fraction,
+               begin_step,
+               end_step=-1,
+               frequency=100):
+    """Initializes an annealing schedule for the drop fraction in a
+    mask update function that follows a cosine function.
+    
+    Args:
+      begin_step: the step to start updating the drop fraction.
+      initial_drop_fraction: the fraction to begin with dropping
+      end_step: iteration to stop updating
+      frequency: the number of steps after which to update
+    """
+    self.alpha = initial_drop_fraction
+    self.begin_step = begin_step
+    self.end_step = end_step
+    self.frequency = frequency
+
+    self._validate_step(self.begin_step, self.end_step, self.frequency, True)
+    self._validate_ratio(initial_drop_fraction, 'drop_ratio')
+
+  def get_config(self):
+    return {
+        'class_name': self.__class__.__name__,
+        'config': {
+            'initial_drop_fraction': self.alpha,
+            'begin_step': self.begin_step,
+            'end_step': self.end_step,
+            'frequency': self.frequency
+        }
+    }
+
+  def _decayed_learning_rate(self, alpha, step, decay_steps):
+    step = min(step, decay_steps)
+    cosine_decay = 0.5 * (1 + tf.math.cos(np.pi * step / decay_steps))
+    decayed = (1 - alpha) * cosine_decay + alpha
+    return self.alpha * decayed
+
+  def _get_update_percentage(self, alpha, should_prune_in_step, step):
+    annealed_alpha = tf.zeros_like(alpha)
+    decay_steps = self.end_step - self.begin_step
+    if should_prune_in_step:
+      annealed_alpha = self._decayed_learning_rate(alpha, step, decay_steps)
+    return annealed_alpha
+
+  def __call__(self, step):
+    should_prune_in_step = self._should_update_in_step(step, self.begin_step, self.end_step,
+                                    self.frequency)
+    return (should_prune_in_step,
+        self._get_update_percentage(self.alpha, should_prune_in_step, step))
+
+
+class ExponentialSchedule(Schedule):
+  """The drop fraction (alpha) annealed with a inverse power schedule."""
+
+  def __init__(self,
+               initial_drop_fraction,
+               begin_step,
+               end_step=-1,
+               frequency=100,
+               k=3):
+    """Initializes an annealing schedule for the drop fraction in a
+    mask update function that follows an exponential function.
+    Args:
+      begin_step: the step to start updating the drop fraction.
+      initial_drop_fraction: the fraction to begin with dropping
+      k: the exponent of the Inverse Power formulation
+        `f_decay(step) = alpha * (1 - step / end_step)^k
+      end_step: iteration to stop updating
+      frequency: the number of steps after which to update
+    """
+    self.alpha = initial_drop_fraction
+    self.begin_step = begin_step
+    self.end_step = end_step
+    # self.begin_step = tf.cast(begin_step, tf.float32)
+    # self.end_step = tf.cast(end_step, tf.float32)
+    self.frequency = frequency
+    self.exponent = k
+
+    self._validate_step(self.begin_step, self.end_step, self.frequency, True)
+    self._validate_ratio(initial_drop_fraction, 'drop_ratio')
+
+  def get_config(self):
+    return {
+        'class_name': self.__class__.__name__,
+        'config': {
+            'initial_drop_fraction': self.alpha,
+            'begin_step': self.begin_step,
+            'end_step': self.end_step,
+            'frequency': self.frequency,
+            'exponent': self.exponent
+        }
+    }
+
+  def _get_update_percentage(self, alpha, should_prune_in_step, step):
+    # alpha is the initial drop fraction.
+    annealed_alpha = tf.zeros_like(alpha)
+    if should_prune_in_step:
+      # div_dtype = alpha.dtype
+      exp = tf.math.divide(
+        tf.cast(step - self.begin_step, tf.float32),
+        tf.cast(self.end_step - self.begin_step, tf.float32),
+      )
+      annealed_alpha = tf.math.multiply(alpha, tf.math.pow(1 - exp, self.exponent),
+                                        name='%s_drop_fraction' % self.exponent)
+    return annealed_alpha
+
+  def __call__(self, step):
+    should_prune_in_step = self._should_update_in_step(step, self.begin_step, self.end_step,
+                                    self.frequency)
+    return (should_prune_in_step,
+        self._get_update_percentage(self.alpha, should_prune_in_step, step))
+
+
+class LRSchedule(Schedule):
+  """Scales the drop fraction according to the learning rate."""
+  def __init__(self,
+               initial_drop_fraction,
+               begin_step,
+               end_step=-1,
+               frequency=100,
+               lr_schedule=None):
+    """Initializes an annealing schedule for the drop fraction in a
+    mask update function that follows the learning rate.
+    Args:
+      begin_step: the step to start updating the drop fraction.
+      initial_drop_fraction: the fraction to begin with dropping
+      end_step: iteration to stop updating
+      frequency: the number of steps after which to update
+      lr_schedule: the schedule followed by the optimizer at train time
+    """
+    self.begin_step = begin_step
+    self.end_step = end_step
+    self.alpha = initial_drop_fraction
+    self.frequency = frequency
+    self._lr_schedule = lr_schedule
+    if not isinstance(self._lr_schedule, tf.keras.optimizers.schedules.LearningRateSchedule):
+      raise ValueError(f"lr_schedule={lr_schedule} is not a valid Keras lr_schedule. See tf.keras.optimizer.schedules.")
+    # essentially optimizer.lr(step=0)
+    self.initial_lr = self._lr_schedule.initial_learning_rate
+
+    self._validate_step(self.begin_step, self.end_step, self.frequency, True)
+    self._validate_ratio(initial_drop_fraction, 'drop_fraction')
+
+  def _get_lr(self, step):
+    return self._lr_schedule(step)
+
+  def get_config(self):
+    return {
+        'class_name': self.__class__.__name__,
+        'config': {
+            'initial_drop_fraction': self.alpha,
+            'begin_step': self.begin_step,
+            'end_step': self.end_step,
+            'frequency': self.frequency,
+            'lr_schedule': self._lr_schedule
+        }
+    }
+
+  def _get_update_percentage(self, alpha, should_prune_in_step, step):
+    current_lr = self._get_lr(step)
+    annealed_alpha = (self.alpha / self.initial_lr) * current_lr
+    return annealed_alpha
+
+  def __call__(self, step):
+    should_prune_in_step = self._should_update_in_step(step, self.begin_step, self.end_step,
+                                    self.frequency)
+    return (should_prune_in_step,
+        self._get_update_percentage(self.alpha, should_prune_in_step, step))
