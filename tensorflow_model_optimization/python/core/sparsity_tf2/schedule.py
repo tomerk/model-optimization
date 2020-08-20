@@ -169,7 +169,8 @@ class ConstantSchedule(Schedule):
             self._get_update_percentage(self.alpha, step))
 
 
-
+# TODO(Kaftan): The tests for this are disabled, should verify if this cosine schedule should be included & if
+# so what its api should even be.
 class CosineSchedule(Schedule):
   """The drop fraction (alpha) annealed with a cosine annealing schedule."""
 
